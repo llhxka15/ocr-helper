@@ -1,110 +1,69 @@
 import streamlit as st
 from PIL import Image
-import pytesseract
 import numpy as np
-import cv2  # 引入强大的计算机视觉库
+from paddleocr import PaddleOCR
+import cv2
 
-# --- 配置区域 ---
-SLICE_HEIGHT = 4000  
-OVERLAP = 200 
-# ----------------
+# --- 页面设置 ---
+st.set_page_config(page_title="微信截图提取神器(Paddle版)", page_icon="🥟")
+st.title("🥟 微信截图提取神器 (Paddle版)")
+st.caption("基于百度 PaddleOCR | 中文识别率 99% | 自动忽略气泡颜色")
 
-st.set_page_config(page_title="微信聊天记录提取专用版", page_icon="💬")
-st.title("💬 微信聊天记录提取专用版")
-st.caption("自动切片 + 图像增强 | 专治微信截图识别不准")
+# --- 缓存加载 OCR 模型 ---
+# 这是一个很重的模型，我们加上 @st.cache_resource 防止每次点击都重新加载导致卡死
+@st.cache_resource
+def load_model():
+    # lang='ch' 代表中文库
+    # use_angle_cls=True 可以自动纠正文字方向
+    # show_log=False 关闭烦人的日志
+    ocr = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
+    return ocr
 
+# 显示加载状态
+with st.spinner('正在初始化 AI 引擎 (首次启动大约需要 30秒)...'):
+    ocr_model = load_model()
+
+# --- 侧边栏 ---
 with st.sidebar:
-    st.write("### 🛠️ 增强原理")
-    st.info("针对微信截图做了特殊优化：\n1. **自动放大**：解决文字模糊问题。\n2. **二值化处理**：自动滤除绿色/白色气泡背景，只保留黑色文字，极大提高准确率。")
+    st.write("### 💡 为什么换这个？")
+    st.info("之前的版本用的是 Tesseract (老技术)。现在的版本使用的是 **PaddleOCR** (国产深度学习技术)，对微信聊天记录的识别能力是碾压级的。")
+    st.warning("⚠️ 注意：由于模型较大，在免费服务器上运行速度可能稍慢，请耐心等待。")
 
-# 图像预处理函数
-def process_image_for_ocr(pil_image):
-    # 1. 转换为 OpenCV 格式
-    img_array = np.array(pil_image)
-    
-    # 转换为灰度图
-    if len(img_array.shape) == 3:
-        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
-    else:
-        gray = img_array
-
-    # 2. 图像放大 (Upscaling) - 关键步骤！
-    # 放大 2 倍，让文字细节更清晰
-    scale_factor = 2
-    height, width = gray.shape[:2]
-    gray = cv2.resize(gray, (width * scale_factor, height * scale_factor), interpolation=cv2.INTER_CUBIC)
-
-    # 3. 二值化 (Thresholding) - 核心步骤！
-    # 使用 OTSU 算法自动寻找最佳阈值，将文字变为纯黑，背景变为纯白
-    # 这步操作会把 绿色气泡、白色气泡、灰色背景 通通变成白色背景，只留下字。
-    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    # 4. 降噪 (可选)
-    # 如果噪点多，可以开启下面这行
-    # binary = cv2.medianBlur(binary, 3)
-
-    return Image.fromarray(binary)
-
-uploaded_file = st.file_uploader("请上传微信长截图", type=["png", "jpg", "jpeg"])
+# --- 主逻辑 ---
+uploaded_file = st.file_uploader("上传微信长截图", type=["png", "jpg", "jpeg"])
 
 if uploaded_file is not None:
-    image = Image.open(uploaded_file)
-    width, height = image.size
+    # 1. 转换图片格式
+    image = Image.open(uploaded_file).convert('RGB')
+    st.image(image, caption='已上传图片', use_column_width=True)
     
-    # 估算切片数量
-    num_slices = 1
-    if height > SLICE_HEIGHT:
-        num_slices = int(np.ceil((height - SLICE_HEIGHT) / (SLICE_HEIGHT - OVERLAP))) + 1
-    
-    st.image(image, caption='原始图片', use_column_width=True)
+    # PaddleOCR 需要 numpy 数组格式
+    img_array = np.array(image)
 
-    if st.button('🚀 开始增强识别', type="primary"):
-        full_text = ""
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        try:
-            top = 0
-            count = 0
-            while top < height:
-                count += 1
-                status_text.write(f"🔄 正在处理片段 {count}/{num_slices}：图像增强 -> OCR识别...")
+    if st.button('🚀 开始智能提取', type="primary"):
+        with st.spinner('正在进行深度学习识别...'):
+            try:
+                # PaddleOCR 核心识别
+                # result 结构: [[[[坐标], (文字, 置信度)], ...]]
+                result = ocr_model.ocr(img_array, cls=True)
                 
-                # 1. 裁剪
-                bottom = min(top + SLICE_HEIGHT, height)
-                slice_img = image.crop((0, top, width, bottom))
-                
-                # 2. 图像增强 (调用上面的函数)
-                # 这一步把图片变成了适合机器阅读的“黑白扫描件”风格
-                enhanced_slice = process_image_for_ocr(slice_img)
-                
-                # (调试用) 如果你想看看增强后长什么样，可以取消下面这行的注释
-                # st.image(enhanced_slice, caption=f"片段 {count} 增强预览")
-
-                # 3. 识别
-                # --psm 6 假设是一个统一的文本块，对这种切片效果通常更好
-                text = pytesseract.image_to_string(enhanced_slice, lang='chi_sim+eng', config='--psm 6')
-                
-                # 简单的后处理：过滤掉过短的乱码
-                lines = text.split('\n')
-                clean_lines = [line for line in lines if len(line.strip()) > 1] # 过滤掉只有一个字符的行（通常是噪点）
-                full_text += "\n".join(clean_lines) + "\n"
-                
-                current_progress = min(count / num_slices, 1.0)
-                progress_bar.progress(current_progress)
-
-                if bottom == height:
-                    break
-                top = bottom - OVERLAP
-            
-            progress_bar.progress(100)
-            status_text.success("✅ 提取完成！")
-            
-            if not full_text.strip():
-                st.warning("未能识别出文字，请检查图片是否清晰。")
-            else:
-                st.text_area("识别结果", full_text, height=600)
-                st.caption("提示：你可以直接复制上面的文字。如果有些表情符号被识别成了乱码，手动删除即可。")
-
-        except Exception as e:
-            st.error(f"发生错误: {e}")
+                txts = []
+                if result[0] is not None:
+                    # 提取文字部分
+                    for line in result[0]:
+                        text = line[1][0]
+                        confidence = line[1][1]
+                        # 简单的置信度过滤，太模糊的不要
+                        if confidence > 0.6: 
+                            txts.append(text)
+                    
+                    full_text = "\n".join(txts)
+                    
+                    st.success("✅ 提取成功！")
+                    st.text_area("识别结果", full_text, height=500)
+                else:
+                    st.warning("未检测到文字。")
+                    
+            except Exception as e:
+                st.error(f"发生错误: {e}")
+                st.write("这可能是由于内存不足导致的。尝试裁剪图片更小一点再试。")
