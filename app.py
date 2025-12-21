@@ -1,98 +1,71 @@
 import streamlit as st
-from cnocr import CnOcr
 from PIL import Image
-import numpy as np
+import io
+import zipfile
+import math
 
-# --- 配置 ---
-# 设置切片高度。CnOCR 对内存更友好，我们可以设置稍微大一点
-SLICE_HEIGHT = 3000  
-OVERLAP = 100 
+st.set_page_config(page_title="Gemini 伴侣：长图无损切片机", page_icon="✂️")
+st.title("✂️ 长图无损切片机")
+st.caption("把长图切成 Gemini 能看清的高清切片 | 专为 AI 投喂设计")
 
-st.set_page_config(page_title="微信截图提取轻量版", page_icon="⚡")
-st.title("⚡ 微信截图提取 (轻量极速版)")
-st.caption("核心引擎：CnOCR | 专为中文优化 | 自动处理超长图")
+# --- 配置参数 ---
+SLICE_HEIGHT = 2000  # 每张图的高度，2000px 是 AI 识别的最佳甜点区
+OVERLAP = 100        # 重叠区域，防止文字被腰斩
 
-# --- 加载模型 ---
-# CnOCR 启动非常快，通常不需要太久的等待
-@st.cache_resource
-def load_model():
-    # det_model_name='en_PP-OCRv3_det' 使用轻量级检测模型
-    return CnOcr()
-
-try:
-    with st.spinner('正在启动轻量级 AI 引擎...'):
-        ocr = load_model()
-except Exception as e:
-    st.error(f"引擎加载失败，请刷新页面重试: {e}")
-
-# --- 主逻辑 ---
-uploaded_file = st.file_uploader("上传长截图", type=["png", "jpg", "jpeg"])
+uploaded_file = st.file_uploader("请上传那张超级长的截图", type=["png", "jpg", "jpeg"])
 
 if uploaded_file is not None:
     # 1. 读取图片
-    image = Image.open(uploaded_file).convert('RGB')
-    width, height = image.size
+    original_image = Image.open(uploaded_file)
+    width, height = original_image.size
     
-    # 显示预览
-    st.image(image, caption='已上传图片', use_column_width=True)
+    st.write(f"📏 图片原始尺寸：{width} x {height} 像素")
     
-    if st.button('🚀 开始提取'):
-        full_text = []
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+    # 计算需要切多少张
+    num_slices = math.ceil(height / (SLICE_HEIGHT - OVERLAP))
+    
+    st.info(f"💡 方案：这张图将被无损切分为 {num_slices} 张高清小图，每张带有重叠区域，确保文字不丢失。")
+
+    if st.button('🔪 开始切片并打包', type="primary"):
+        # 创建一个内存中的 ZIP 文件
+        zip_buffer = io.BytesIO()
         
-        try:
-            # 计算切片数
-            num_slices = 1
-            if height > SLICE_HEIGHT:
-                num_slices = int(np.ceil((height - SLICE_HEIGHT) / (SLICE_HEIGHT - OVERLAP))) + 1
-            
+        with zipfile.ZipFile(zip_buffer, "a", zipfile.ZIP_DEFLATED, False) as zip_file:
             top = 0
-            count = 0
-            
-            while top < height:
-                count += 1
-                status_text.write(f"⚡ 正在识别片段 {count}/{num_slices}...")
-                
-                # 2. 切割图片
+            for i in range(num_slices):
+                # 计算底部
                 bottom = min(top + SLICE_HEIGHT, height)
-                # Crop tuple: (left, top, right, bottom)
-                slice_img = image.crop((0, top, width, bottom))
                 
-                # 转为 numpy 格式供 CnOCR 使用
-                img_array = np.array(slice_img)
-
-                # 3. 核心识别
-                # CnOCR 返回的是一个列表，每一项是 {'text': '内容', 'score': 0.8, ...}
-                res = ocr.ocr(img_array)
+                # 切割
+                slice_img = original_image.crop((0, top, width, bottom))
                 
-                # 4. 提取文字并拼接
-                for line in res:
-                    text_content = line['text']
-                    # 过滤掉置信度太低的乱码 (小于 0.4)
-                    if line['score'] > 0.4:
-                        full_text.append(text_content)
+                # 保存到内存
+                img_byte_arr = io.BytesIO()
+                # 默认存为 PNG 格式，保持无损
+                slice_img.save(img_byte_arr, format='PNG')
                 
-                # 更新进度
-                current_progress = min(count / num_slices, 1.0)
-                progress_bar.progress(current_progress)
-
-                if bottom == height:
-                    break
+                # 写入 ZIP，文件名命名为 part_01.png, part_02.png 以便排序
+                file_name = f"part_{i+1:02d}.png"
+                zip_file.writestr(file_name, img_byte_arr.getvalue())
+                
+                # 更新下一张的起始位置（减去重叠区）
                 top = bottom - OVERLAP
+                
+                # 能够让用户预览一下切片效果（只显示前两张）
+                if i < 2:
+                    st.image(slice_img, caption=f"预览：{file_name}", use_column_width=True)
 
-            progress_bar.progress(100)
-            status_text.success("✅ 提取完成！")
-            
-            # 结果去重与展示
-            # (简单的去重逻辑，防止重叠区域导致的一句话出现两次)
-            final_output = "\n".join(full_text)
-            
-            if not final_output.strip():
-                st.warning("未识别到文字，请确保图片清晰。")
-            else:
-                st.text_area("识别结果", final_output, height=500)
-
-        except Exception as e:
-            st.error(f"发生错误: {e}")
-            st.info("如果提示 Memory Error，请尝试将长图裁剪成两半再上传。")
+        # 准备下载
+        st.success("✅ 切片完成！请下载 ZIP 包。")
+        st.download_button(
+            label="📦 下载切片压缩包 (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name="gemini_slices.zip",
+            mime="application/zip"
+        )
+        
+        st.markdown("---")
+        st.markdown("### 接下来怎么做？")
+        st.markdown("1. 解压下载的 ZIP 文件。")
+        st.markdown("2. 把里面的图片 **全选**，直接拖进 Gemini 的对话框。")
+        st.markdown("3. 发送下面的提示词给 Gemini。")
