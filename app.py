@@ -1,69 +1,98 @@
 import streamlit as st
+from cnocr import CnOcr
 from PIL import Image
 import numpy as np
-from paddleocr import PaddleOCR
-import cv2
 
-# --- 页面设置 ---
-st.set_page_config(page_title="微信截图提取神器(Paddle版)", page_icon="🥟")
-st.title("🥟 微信截图提取神器 (Paddle版)")
-st.caption("基于百度 PaddleOCR | 中文识别率 99% | 自动忽略气泡颜色")
+# --- 配置 ---
+# 设置切片高度。CnOCR 对内存更友好，我们可以设置稍微大一点
+SLICE_HEIGHT = 3000  
+OVERLAP = 100 
 
-# --- 缓存加载 OCR 模型 ---
-# 这是一个很重的模型，我们加上 @st.cache_resource 防止每次点击都重新加载导致卡死
+st.set_page_config(page_title="微信截图提取轻量版", page_icon="⚡")
+st.title("⚡ 微信截图提取 (轻量极速版)")
+st.caption("核心引擎：CnOCR | 专为中文优化 | 自动处理超长图")
+
+# --- 加载模型 ---
+# CnOCR 启动非常快，通常不需要太久的等待
 @st.cache_resource
 def load_model():
-    # lang='ch' 代表中文库
-    # use_angle_cls=True 可以自动纠正文字方向
-    # show_log=False 关闭烦人的日志
-    ocr = PaddleOCR(use_angle_cls=True, lang="ch", show_log=False)
-    return ocr
+    # det_model_name='en_PP-OCRv3_det' 使用轻量级检测模型
+    return CnOcr()
 
-# 显示加载状态
-with st.spinner('正在初始化 AI 引擎 (首次启动大约需要 30秒)...'):
-    ocr_model = load_model()
-
-# --- 侧边栏 ---
-with st.sidebar:
-    st.write("### 💡 为什么换这个？")
-    st.info("之前的版本用的是 Tesseract (老技术)。现在的版本使用的是 **PaddleOCR** (国产深度学习技术)，对微信聊天记录的识别能力是碾压级的。")
-    st.warning("⚠️ 注意：由于模型较大，在免费服务器上运行速度可能稍慢，请耐心等待。")
+try:
+    with st.spinner('正在启动轻量级 AI 引擎...'):
+        ocr = load_model()
+except Exception as e:
+    st.error(f"引擎加载失败，请刷新页面重试: {e}")
 
 # --- 主逻辑 ---
-uploaded_file = st.file_uploader("上传微信长截图", type=["png", "jpg", "jpeg"])
+uploaded_file = st.file_uploader("上传长截图", type=["png", "jpg", "jpeg"])
 
 if uploaded_file is not None:
-    # 1. 转换图片格式
+    # 1. 读取图片
     image = Image.open(uploaded_file).convert('RGB')
+    width, height = image.size
+    
+    # 显示预览
     st.image(image, caption='已上传图片', use_column_width=True)
     
-    # PaddleOCR 需要 numpy 数组格式
-    img_array = np.array(image)
-
-    if st.button('🚀 开始智能提取', type="primary"):
-        with st.spinner('正在进行深度学习识别...'):
-            try:
-                # PaddleOCR 核心识别
-                # result 结构: [[[[坐标], (文字, 置信度)], ...]]
-                result = ocr_model.ocr(img_array, cls=True)
+    if st.button('🚀 开始提取'):
+        full_text = []
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        
+        try:
+            # 计算切片数
+            num_slices = 1
+            if height > SLICE_HEIGHT:
+                num_slices = int(np.ceil((height - SLICE_HEIGHT) / (SLICE_HEIGHT - OVERLAP))) + 1
+            
+            top = 0
+            count = 0
+            
+            while top < height:
+                count += 1
+                status_text.write(f"⚡ 正在识别片段 {count}/{num_slices}...")
                 
-                txts = []
-                if result[0] is not None:
-                    # 提取文字部分
-                    for line in result[0]:
-                        text = line[1][0]
-                        confidence = line[1][1]
-                        # 简单的置信度过滤，太模糊的不要
-                        if confidence > 0.6: 
-                            txts.append(text)
-                    
-                    full_text = "\n".join(txts)
-                    
-                    st.success("✅ 提取成功！")
-                    st.text_area("识别结果", full_text, height=500)
-                else:
-                    st.warning("未检测到文字。")
-                    
-            except Exception as e:
-                st.error(f"发生错误: {e}")
-                st.write("这可能是由于内存不足导致的。尝试裁剪图片更小一点再试。")
+                # 2. 切割图片
+                bottom = min(top + SLICE_HEIGHT, height)
+                # Crop tuple: (left, top, right, bottom)
+                slice_img = image.crop((0, top, width, bottom))
+                
+                # 转为 numpy 格式供 CnOCR 使用
+                img_array = np.array(slice_img)
+
+                # 3. 核心识别
+                # CnOCR 返回的是一个列表，每一项是 {'text': '内容', 'score': 0.8, ...}
+                res = ocr.ocr(img_array)
+                
+                # 4. 提取文字并拼接
+                for line in res:
+                    text_content = line['text']
+                    # 过滤掉置信度太低的乱码 (小于 0.4)
+                    if line['score'] > 0.4:
+                        full_text.append(text_content)
+                
+                # 更新进度
+                current_progress = min(count / num_slices, 1.0)
+                progress_bar.progress(current_progress)
+
+                if bottom == height:
+                    break
+                top = bottom - OVERLAP
+
+            progress_bar.progress(100)
+            status_text.success("✅ 提取完成！")
+            
+            # 结果去重与展示
+            # (简单的去重逻辑，防止重叠区域导致的一句话出现两次)
+            final_output = "\n".join(full_text)
+            
+            if not final_output.strip():
+                st.warning("未识别到文字，请确保图片清晰。")
+            else:
+                st.text_area("识别结果", final_output, height=500)
+
+        except Exception as e:
+            st.error(f"发生错误: {e}")
+            st.info("如果提示 Memory Error，请尝试将长图裁剪成两半再上传。")
