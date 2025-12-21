@@ -2,38 +2,63 @@ import streamlit as st
 from PIL import Image
 import pytesseract
 import numpy as np
+import cv2  # 引入强大的计算机视觉库
 
 # --- 配置区域 ---
-# 设置切片高度。太高容易爆内存，太低识别慢。4000px是个不错的平衡点。
 SLICE_HEIGHT = 4000  
-# 设置重叠区域高度。防止文字刚好在切割线上被切断，设置重叠区能保证文字完整。
-# 识别后可能会有少量重复文字，属于正常现象。
 OVERLAP = 200 
 # ----------------
 
-st.set_page_config(page_title="长图文字提取神器Pro", page_icon="📝")
-st.title("📝 长截屏文字提取器 Pro")
-st.caption("自动切片处理超长图 | 基于 Tesseract OCR | 支持中文")
+st.set_page_config(page_title="微信聊天记录提取专用版", page_icon="💬")
+st.title("💬 微信聊天记录提取专用版")
+st.caption("自动切片 + 图像增强 | 专治微信截图识别不准")
 
 with st.sidebar:
-    st.write("### Pro版升级说明")
-    st.info("已针对超长图进行优化。程序会自动将长图切割成多段进行识别，解决了'Image too large'报错的问题。")
+    st.write("### 🛠️ 增强原理")
+    st.info("针对微信截图做了特殊优化：\n1. **自动放大**：解决文字模糊问题。\n2. **二值化处理**：自动滤除绿色/白色气泡背景，只保留黑色文字，极大提高准确率。")
 
-uploaded_file = st.file_uploader("请上传图片 (支持 png, jpg, jpeg)", type=["png", "jpg", "jpeg"])
+# 图像预处理函数
+def process_image_for_ocr(pil_image):
+    # 1. 转换为 OpenCV 格式
+    img_array = np.array(pil_image)
+    
+    # 转换为灰度图
+    if len(img_array.shape) == 3:
+        gray = cv2.cvtColor(img_array, cv2.COLOR_RGB2GRAY)
+    else:
+        gray = img_array
+
+    # 2. 图像放大 (Upscaling) - 关键步骤！
+    # 放大 2 倍，让文字细节更清晰
+    scale_factor = 2
+    height, width = gray.shape[:2]
+    gray = cv2.resize(gray, (width * scale_factor, height * scale_factor), interpolation=cv2.INTER_CUBIC)
+
+    # 3. 二值化 (Thresholding) - 核心步骤！
+    # 使用 OTSU 算法自动寻找最佳阈值，将文字变为纯黑，背景变为纯白
+    # 这步操作会把 绿色气泡、白色气泡、灰色背景 通通变成白色背景，只留下字。
+    _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    # 4. 降噪 (可选)
+    # 如果噪点多，可以开启下面这行
+    # binary = cv2.medianBlur(binary, 3)
+
+    return Image.fromarray(binary)
+
+uploaded_file = st.file_uploader("请上传微信长截图", type=["png", "jpg", "jpeg"])
 
 if uploaded_file is not None:
     image = Image.open(uploaded_file)
-    # 计算需要切多少片
     width, height = image.size
-    # 估算切片数量用于进度条
+    
+    # 估算切片数量
     num_slices = 1
     if height > SLICE_HEIGHT:
         num_slices = int(np.ceil((height - SLICE_HEIGHT) / (SLICE_HEIGHT - OVERLAP))) + 1
-        st.caption(f"📊 图片高度 {height}px，将自动切割成约 {num_slices} 个片段进行处理。")
-
-    st.image(image, caption='已上传图片 (预览)', use_column_width=True)
     
-    if st.button('🚀 开始专业提取', type="primary"):
+    st.image(image, caption='原始图片', use_column_width=True)
+
+    if st.button('🚀 开始增强识别', type="primary"):
         full_text = ""
         progress_bar = st.progress(0)
         status_text = st.empty()
@@ -43,41 +68,43 @@ if uploaded_file is not None:
             count = 0
             while top < height:
                 count += 1
-                status_text.write(f"⏳ 正在处理第 {count}/{num_slices} 个片段...")
+                status_text.write(f"🔄 正在处理片段 {count}/{num_slices}：图像增强 -> OCR识别...")
                 
-                # 1. 计算当前切片的底部坐标
+                # 1. 裁剪
                 bottom = min(top + SLICE_HEIGHT, height)
-                
-                # 2. 裁剪图片
-                # crop区域是 (左, 上, 右, 下)
                 slice_img = image.crop((0, top, width, bottom))
                 
-                # 3. 识别当前片段
-                text = pytesseract.image_to_string(slice_img, lang='chi_sim+eng')
-                full_text += text + "\n"
+                # 2. 图像增强 (调用上面的函数)
+                # 这一步把图片变成了适合机器阅读的“黑白扫描件”风格
+                enhanced_slice = process_image_for_ocr(slice_img)
                 
-                # 更新进度条
+                # (调试用) 如果你想看看增强后长什么样，可以取消下面这行的注释
+                # st.image(enhanced_slice, caption=f"片段 {count} 增强预览")
+
+                # 3. 识别
+                # --psm 6 假设是一个统一的文本块，对这种切片效果通常更好
+                text = pytesseract.image_to_string(enhanced_slice, lang='chi_sim+eng', config='--psm 6')
+                
+                # 简单的后处理：过滤掉过短的乱码
+                lines = text.split('\n')
+                clean_lines = [line for line in lines if len(line.strip()) > 1] # 过滤掉只有一个字符的行（通常是噪点）
+                full_text += "\n".join(clean_lines) + "\n"
+                
                 current_progress = min(count / num_slices, 1.0)
                 progress_bar.progress(current_progress)
 
-                # 4. 计算下一片的起始位置
                 if bottom == height:
-                    break # 已经是最后一张了
-                # 核心逻辑：往下走一步，但要往回退一个OVERLAP的距离，形成重叠
+                    break
                 top = bottom - OVERLAP
             
             progress_bar.progress(100)
-            status_text.success("✅ 所有片段处理完成！")
+            status_text.success("✅ 提取完成！")
             
             if not full_text.strip():
-                st.warning("未能识别出文字。")
+                st.warning("未能识别出文字，请检查图片是否清晰。")
             else:
-                st.success("提取成功！请向下滚动查看结果。")
-                st.info("💡 提示：由于采用了重叠切割以防止文字断裂，结果中可能会出现少量重复的文本行，请手动查阅。")
-                st.text_area("最终识别结果 (可全选复制)", full_text, height=500)
+                st.text_area("识别结果", full_text, height=600)
+                st.caption("提示：你可以直接复制上面的文字。如果有些表情符号被识别成了乱码，手动删除即可。")
 
         except Exception as e:
-            st.error(f"处理过程中发生未知错误: {e}")
-        finally:
-            # 清理内存
-            del image
+            st.error(f"发生错误: {e}")
